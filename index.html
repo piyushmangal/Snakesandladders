@@ -1,978 +1,732 @@
-import React, { useState, useEffect, useRef, useCallback, useImperativeHandle } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, doc, updateDoc, addDoc, getDocs, deleteDoc, collection, query, where } from 'firebase/firestore';
-
-// Tailwind CSS is assumed to be available, no explicit import needed.
-
-// Global Firebase configuration variables (provided by Canvas environment)
-// These variables are injected into the environment by the Canvas platform.
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-snakes-and-ladders-app';
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-// Function to check if Firebase config is valid
-const isValidFirebaseConfig = (config) => {
-    return config && config.apiKey && config.projectId && config.appId;
-};
-
-// Game board configuration
-const boardSize = 10; // 10x10 board for a classic game
-const totalSquares = boardSize * boardSize; // Total number of squares on the board
-
-// Snakes: key = head, value = tail. When a player lands on the head, they slide to the tail.
-const snakes = {
-    16: 6,
-    47: 26,
-    49: 11,
-    56: 53,
-    62: 19,
-    64: 60,
-    87: 24,
-    93: 73,
-    95: 75,
-    98: 78
-};
-
-// Ladders: key = bottom, value = top. When a player lands on the bottom, they climb to the top.
-const ladders = {
-    // Ladder from 1 to 38 has been removed
-    4: 14,
-    9: 31,
-    21: 42,
-    28: 84,
-    36: 44,
-    51: 67,
-    80: 100,
-    71: 91
-};
-
-// Player colors for visual distinction
-const playerColors = ['#e74c3c', '#2980b9', '#27ae60', '#f39c12']; // Red, Blue, Green, Orange
-
-// GameBoardCanvas Component: Handles all drawing on the HTML Canvas
-// It's memoized and uses forwardRef for efficient rendering and direct parent access to drawing functions.
-const GameBoardCanvas = React.memo(React.forwardRef(({ players, boardDimension }, ref) => {
-    const canvasRef = useRef(null); // Ref to access the canvas DOM element
-    const squareSize = boardDimension / boardSize; // Size of each square based on total board dimension
-
-    // Helper function to get X, Y coordinates for a given square number on the canvas.
-    // This function is local to GameBoardCanvas and depends only on its props.
-    const getCoordinatesForSquareInternal = useCallback((square) => {
-        const row = Math.floor((square - 1) / boardSize);
-        let col;
-        if (row % 2 === 0) {
-            col = (square - 1) % boardSize;
-        } else {
-            col = boardSize - 1 - ((square - 1) % boardSize);
-        }
-        const x = col * squareSize;
-        const y = (boardSize - 1 - row) * squareSize;
-        return { x, y };
-    }, [squareSize, boardDimension]); // Dependencies for internal helper
-
-    // Function to draw the static elements of the board (squares, snakes, ladders).
-    // This is called whenever the board needs to be redrawn (e.g., resize, initial load, before player updates).
-    const drawBoardStaticElements = useCallback(() => {
-        if (!canvasRef.current) return;
-        const ctx = canvasRef.current.getContext('2d');
-        ctx.clearRect(0, 0, boardDimension, boardDimension); // Clear the entire canvas
-
-        // Draw each square
-        for (let i = 0; i < totalSquares; i++) {
-            const squareNumber = i + 1;
-            const { x, y } = getCoordinatesForSquareInternal(squareNumber);
-
-            // Alternate square colors for checkerboard effect
-            ctx.fillStyle = (squareNumber % 2 === 0) ? '#a0ced9' : '#c1e2f0'; // Light blue colors
-            ctx.fillRect(x, y, squareSize, squareSize);
-
-            // Draw square borders
-            ctx.strokeStyle = '#6a9bd1'; // Medium blue border
-            ctx.lineWidth = 1;
-            ctx.strokeRect(x, y, squareSize, squareSize);
-
-            // Draw square numbers
-            ctx.fillStyle = '#334e68'; // Dark blue-gray for text
-            ctx.font = `${squareSize * 0.25}px Inter`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(squareNumber.toString(), x + squareSize / 2, y + squareSize / 2);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snakes & Ladders</title>
+    <style>
+        /* Basic CSS for the layout and styling */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #a0ced9 0%, #c1e2f0 100%);
+            margin: 0;
+            color: #334e68;
+            padding: 20px;
+            box-sizing: border-box;
         }
 
-        // Draw all snakes and ladders on top of the squares
-        drawSnakesAndLadders(ctx, squareSize, boardDimension, getCoordinatesForSquareInternal); // Pass helper
-    }, [boardDimension, squareSize, getCoordinatesForSquareInternal]);
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
 
-    // Function to draw the visual representation of snakes and ladders
-    const drawSnakesAndLadders = useCallback((ctx, squareSize, boardDimension, getCoordsFunc) => { // Accept helper as param
-        // Draw Ladders
-        for (const startSquare in ladders) {
-            const endSquare = ladders[startSquare];
-            const startCoords = getCoordsFunc(parseInt(startSquare));
-            const endCoords = getCoordsFunc(endSquare);
+        .game-container {
+            background-color: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            padding: 25px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            max-width: 900px;
+            width: 100%;
+            margin-bottom: 20px;
+        }
 
-            ctx.strokeStyle = '#27ae60'; // Green for ladders
-            ctx.lineWidth = 4;
+        #gameBoardCanvas {
+            border: 5px solid #6a9bd1;
+            border-radius: 8px;
+            background-color: #fff;
+            max-width: 100%;
+            height: auto;
+        }
 
-            const dx = endCoords.x - startCoords.x;
-            const dy = endCoords.y - startCoords.y;
-            const angle = Math.atan2(dy, dx);
-            const perpOffset = squareSize * 0.15; // Offset for parallel lines to create thickness
+        .controls, .player-setup {
+            width: 100%;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
 
-            for (let i = -1; i <= 1; i++) {
+        .controls button, .player-setup button, .player-setup input {
+            padding: 12px 25px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.1s ease;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .controls button {
+            background-color: #3498db;
+            color: white;
+        }
+
+        .controls button:hover:not(:disabled) {
+            background-color: #2980b9;
+            transform: translateY(-2px);
+        }
+
+        .controls button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .player-setup input {
+            background-color: #ecf0f1;
+            border: 1px solid #bdc3c7;
+            color: #334e68;
+        }
+
+        .player-input-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .player-input-group button {
+            padding: 8px 12px;
+            font-size: 0.9em;
+            background-color: #e74c3c;
+            color: white;
+            box-shadow: none;
+        }
+
+        .player-input-group button:hover {
+            background-color: #c0392b;
+            transform: translateY(-1px);
+        }
+
+        #addPlayerBtn {
+            background-color: #27ae60;
+            color: white;
+        }
+        #addPlayerBtn:hover {
+            background-color: #229954;
+        }
+
+
+        #gameMessage, #diceResult {
+            text-align: center;
+            font-size: 1.2em;
+            margin-top: 10px;
+            min-height: 30px; /* Ensure space even when empty */
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        #playerList {
+            width: 100%;
+            max-width: 400px;
+            list-style: none;
+            padding: 0;
+            margin-top: 15px;
+            border-top: 1px solid #ecf0f1;
+            padding-top: 10px;
+        }
+
+        #playerList li {
+            padding: 8px 0;
+            border-bottom: 1px solid #ecf0f1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 500;
+        }
+
+        #playerList li:last-child {
+            border-bottom: none;
+        }
+
+        .player-name-circle {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
+            border: 1px solid rgba(0,0,0,0.2);
+        }
+
+        .current-player-indicator {
+            background-color: #f39c12;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 5px;
+            font-size: 0.8em;
+            margin-left: 10px;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        /* Specific colors for players for visual distinction */
+        .player-color-0 { background-color: #e74c3c; } /* Red */
+        .player-color-1 { background-color: #2980b9; } /* Blue */
+        .player-color-2 { background-color: #27ae60; } /* Green */
+        .player-color-3 { background-color: #f39c12; } /* Orange */
+    </style>
+</head>
+<body>
+    <h1>Snakes & Ladders</h1>
+
+    <div class="game-container">
+        <div id="setupScreen">
+            <h2>Game Setup</h2>
+            <div class="player-setup">
+                <div class="player-input-group">
+                    <input type="text" id="player1Name" placeholder="Your Name" value="Player 1">
+                </div>
+                <div id="opponentInputs">
+                    </div>
+                <button id="addPlayerBtn">Add Opponent</button>
+                <button id="startGameBtn">Start Game</button>
+            </div>
+            <ul id="playerList">
+                </ul>
+        </div>
+
+        <div id="gameScreen" class="hidden">
+            <canvas id="gameBoardCanvas"></canvas>
+            <div class="controls">
+                <p id="diceResult"></p>
+                <button id="rollDiceBtn">Roll Dice</button>
+                <p id="gameMessage"></p>
+                <button id="restartGameBtn">Restart Game</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Game Configuration ---
+        const boardSize = 10; // 10x10 board
+        const totalSquares = boardSize * boardSize;
+
+        const snakes = {
+            16: 6, 47: 26, 49: 11, 56: 53, 62: 19,
+            64: 60, 87: 24, 93: 73, 95: 75, 98: 78
+        };
+
+        const ladders = {
+            4: 14, 9: 31, 21: 42, 28: 84, 36: 44,
+            51: 67, 71: 91, 80: 100
+        };
+
+        const playerColors = ['#e74c3c', '#2980b9', '#27ae60', '#f39c12']; // Red, Blue, Green, Orange
+        const playerRadiusRatio = 0.2; // Player token radius relative to square size
+
+        // --- DOM Elements ---
+        const setupScreen = document.getElementById('setupScreen');
+        const gameScreen = document.getElementById('gameScreen');
+        const canvas = document.getElementById('gameBoardCanvas');
+        const ctx = canvas.getContext('2d');
+        const rollDiceBtn = document.getElementById('rollDiceBtn');
+        const gameMessageElement = document.getElementById('gameMessage');
+        const diceResultElement = document.getElementById('diceResult');
+        const restartGameBtn = document.getElementById('restartGameBtn');
+
+        const player1NameInput = document.getElementById('player1Name');
+        const opponentInputsDiv = document.getElementById('opponentInputs');
+        const addPlayerBtn = document.getElementById('addPlayerBtn');
+        const startGameBtn = document.getElementById('startGameBtn');
+        const playerListUl = document.getElementById('playerList');
+
+        // --- Game State Variables ---
+        let players = [];
+        let currentPlayerIndex = 0;
+        let gameOver = false;
+        let boardDimension = 600; // Default canvas size, will be responsive
+        let squareSize = 0; // Calculated dynamically
+        const opponentMax = playerColors.length - 1; // Max opponents based on available colors
+
+        // --- Helper Functions ---
+
+        // Adjusts canvas size responsively
+        function adjustCanvasSize() {
+            const containerWidth = canvas.parentElement.clientWidth;
+            const minDimension = Math.min(containerWidth * 0.9, window.innerHeight * 0.7);
+            boardDimension = Math.max(400, Math.min(600, minDimension)); // Keep between 400 and 600
+            canvas.width = boardDimension;
+            canvas.height = boardDimension;
+            squareSize = boardDimension / boardSize;
+            drawBoard(); // Redraw board when size changes
+            drawPlayers(); // Redraw players
+        }
+
+        // Calculates pixel coordinates for a given square number
+        function getCoordinatesForSquare(square) {
+            const row = Math.floor((square - 1) / boardSize);
+            let col;
+            if (row % 2 === 0) { // Even rows (0, 2, 4...) from left to right
+                col = (square - 1) % boardSize;
+            } else { // Odd rows (1, 3, 5...) from right to left
+                col = boardSize - 1 - ((square - 1) % boardSize);
+            }
+            const x = col * squareSize;
+            const y = (boardSize - 1 - row) * squareSize; // Y-axis is inverted in canvas (0,0 is top-left)
+            return { x, y };
+        }
+
+        // Gets starting coordinates for players before they enter square 1
+        function getStartLineCoordinates() {
+            const square1Coords = getCoordinatesForSquare(1);
+            // Place them just below square 1, centered
+            return {
+                x: square1Coords.x + squareSize / 2,
+                y: boardDimension + squareSize / 2
+            };
+        }
+
+        // Draws the static elements of the board (squares, numbers, snakes, ladders)
+        function drawBoard() {
+            ctx.clearRect(0, 0, boardDimension, boardDimension); // Clear entire canvas
+
+            // Draw squares
+            for (let i = 0; i < totalSquares; i++) {
+                const squareNumber = i + 1;
+                const { x, y } = getCoordinatesForSquare(squareNumber);
+
+                ctx.fillStyle = (squareNumber % 2 === 0) ? '#e0f2f7' : '#f0faff'; // Light blue shades
+                ctx.fillRect(x, y, squareSize, squareSize);
+
+                ctx.strokeStyle = '#a8dadc'; // Border color
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, squareSize, squareSize);
+
+                ctx.fillStyle = '#457b9d'; // Text color
+                ctx.font = `${squareSize * 0.2}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(squareNumber.toString(), x + squareSize / 2, y + squareSize / 2);
+            }
+
+            // Draw Ladders
+            for (const startSquare in ladders) {
+                const endSquare = ladders[startSquare];
+                const startCoords = getCoordinatesForSquare(parseInt(startSquare));
+                const endCoords = getCoordinatesForSquare(endSquare);
+
+                ctx.strokeStyle = '#28a745'; // Green for ladders
+                ctx.lineWidth = 5;
+                ctx.lineCap = 'round';
+
+                const x1 = startCoords.x + squareSize / 2;
+                const y1 = startCoords.y + squareSize / 2;
+                const x2 = endCoords.x + squareSize / 2;
+                const y2 = endCoords.y + squareSize / 2;
+
+                // Draw two parallel lines for ladder sides
+                const angle = Math.atan2(y2 - y1, x2 - x1);
+                const offset = squareSize * 0.1; // Offset for parallel lines
                 ctx.beginPath();
-                ctx.moveTo(startCoords.x + squareSize / 2 + perpOffset * Math.cos(angle + Math.PI / 2) * i,
-                           startCoords.y + squareSize / 2 + perpOffset * Math.sin(angle + Math.PI / 2) * i);
-                ctx.lineTo(endCoords.x + squareSize / 2 + perpOffset * Math.cos(angle + Math.PI / 2) * i,
-                           endCoords.y + squareSize / 2 + perpOffset * Math.sin(angle + Math.PI / 2) * i);
+                ctx.moveTo(x1 + offset * Math.cos(angle + Math.PI / 2), y1 + offset * Math.sin(angle + Math.PI / 2));
+                ctx.lineTo(x2 + offset * Math.cos(angle + Math.PI / 2), y2 + offset * Math.sin(angle + Math.PI / 2));
                 ctx.stroke();
-            }
 
-            const numRungs = 5;
-            for(let i = 1; i < numRungs; i++) {
-                const t = i / numRungs;
-                const rungX1 = startCoords.x + squareSize / 2 + (dx * t) + perpOffset * Math.cos(angle + Math.PI / 2);
-                const rungY1 = startCoords.y + squareSize / 2 + (dy * t) + perpOffset * Math.sin(angle + Math.PI / 2);
-                const rungX2 = startCoords.x + squareSize / 2 + (dx * t) - perpOffset * Math.cos(angle + Math.PI / 2);
-                const rungY2 = startCoords.y + squareSize / 2 + (dy * t) - perpOffset * Math.sin(angle + Math.PI / 2);
                 ctx.beginPath();
-                ctx.moveTo(rungX1, rungY1);
-                ctx.lineTo(rungX2, rungY2);
+                ctx.moveTo(x1 - offset * Math.cos(angle + Math.PI / 2), y1 - offset * Math.sin(angle + Math.PI / 2));
+                ctx.lineTo(x2 - offset * Math.cos(angle + Math.PI / 2), y2 - offset * Math.sin(angle + Math.PI / 2));
                 ctx.stroke();
+
+                // Draw rungs
+                const numRungs = 5;
+                for (let i = 1; i < numRungs; i++) {
+                    const t = i / numRungs;
+                    const rungX1 = x1 + (x2 - x1) * t + offset * Math.cos(angle + Math.PI / 2);
+                    const rungY1 = y1 + (y2 - y1) * t + offset * Math.sin(angle + Math.PI / 2);
+                    const rungX2 = x1 + (x2 - x1) * t - offset * Math.cos(angle + Math.PI / 2);
+                    const rungY2 = y1 + (y2 - y1) * t - offset * Math.sin(angle + Math.PI / 2);
+                    ctx.beginPath();
+                    ctx.moveTo(rungX1, rungY1);
+                    ctx.lineTo(rungX2, rungY2);
+                    ctx.stroke();
+                }
+            }
+
+            // Draw Snakes
+            for (const startSquare in snakes) {
+                const endSquare = snakes[startSquare];
+                const startCoords = getCoordinatesForSquare(parseInt(startSquare));
+                const endCoords = getCoordinatesForSquare(endSquare);
+
+                ctx.strokeStyle = '#dc3545'; // Red for snakes
+                ctx.lineWidth = 10;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+
+                const x1 = startCoords.x + squareSize / 2;
+                const y1 = startCoords.y + squareSize / 2;
+                const x2 = endCoords.x + squareSize / 2;
+                const y2 = endCoords.y + squareSize / 2;
+
+                // Draw a curvy snake path
+                const midX = (x1 + x2) / 2;
+                const midY = (y1 + y2) / 2;
+                const controlPointOffset = squareSize * 1.5; // Controls the "waviness"
+
+                // Determine control point direction based on snake direction
+                let cp1x, cp1y, cp2x, cp2y;
+                if (Math.abs(x1 - x2) > Math.abs(y1 - y2)) { // More horizontal
+                    cp1x = x1;
+                    cp1y = y1 - controlPointOffset * Math.sign(y2 - y1 || 1); // Bend upwards/downwards
+                    cp2x = x2;
+                    cp2y = y2 + controlPointOffset * Math.sign(y2 - y1 || 1);
+                } else { // More vertical
+                    cp1x = x1 - controlPointOffset * Math.sign(x2 - x1 || 1); // Bend left/right
+                    cp1y = y1;
+                    cp2x = x2 + controlPointOffset * Math.sign(x2 - x1 || 1);
+                    cp2y = y2;
+                }
+
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+                ctx.stroke();
+
+                // Draw snake head (triangle or circle)
+                ctx.fillStyle = '#dc3545';
+                ctx.beginPath();
+                ctx.arc(x1, y1, squareSize * 0.2, 0, Math.PI * 2); // Head at start
+                ctx.fill();
+
+                // Draw snake tail (smaller circle)
+                ctx.fillStyle = '#8b0000';
+                ctx.beginPath();
+                ctx.arc(x2, y2, squareSize * 0.15, 0, Math.PI * 2); // Tail at end
+                ctx.fill();
             }
         }
 
-        // Draw Snakes
-        for (const startSquare in snakes) {
-            const endSquare = snakes[startSquare];
-            const startCoords = getCoordsFunc(parseInt(startSquare));
-            const endCoords = getCoordsFunc(endSquare);
+        // Draws all player tokens
+        function drawPlayers() {
+            // Re-draw the board to clear previous player positions
+            drawBoard();
 
-            ctx.strokeStyle = '#e74c3c'; // Red for snakes
-            ctx.lineCap = 'round';
-            ctx.lineWidth = 8;
+            const playerTokenRadius = squareSize * playerRadiusRatio;
 
-            ctx.beginPath();
-            ctx.moveTo(startCoords.x + squareSize / 2, startCoords.y + squareSize / 2);
+            players.forEach(player => {
+                let displayX, displayY;
 
-            const numSegments = 12;
-            const totalDx = endCoords.x - startCoords.x;
-            const totalDy = endCoords.y - startCoords.y;
-            const offsetMagnitude = squareSize / 6;
+                if (player.position === 0) {
+                    // Place players on the start line below square 1
+                    const startCoords = getStartLineCoordinates();
+                    displayX = startCoords.x;
+                    displayY = startCoords.y + player.id * playerTokenRadius * 2.5; // Stack players slightly
+                } else {
+                    const coords = getCoordinatesForSquare(player.position);
+                    // Adjust for multiple players on the same square
+                    const offsetIndex = players.filter(p => p.position === player.position && p.id <= player.id).length - 1;
+                    const offsetX = (offsetIndex % 2 === 0 ? 1 : -1) * (Math.floor(offsetIndex / 2) + 1) * (playerTokenRadius * 0.7);
+                    const offsetY = (offsetIndex % 2 === 1 ? 1 : -1) * (Math.floor(offsetIndex / 2) + 1) * (playerTokenRadius * 0.7);
 
-            for (let j = 1; j <= numSegments; j++) {
-                const t = j / numSegments;
-                let currentX = startCoords.x + totalDx * t;
-                let currentY = startCoords.y + totalDy * t;
+                    displayX = coords.x + squareSize / 2 + offsetX;
+                    displayY = coords.y + squareSize / 2 + offsetY;
+                }
 
-                const angle = Math.atan2(totalDy, totalDx);
-                const perpendicularAngle = angle + Math.PI / 2;
-                const offset = offsetMagnitude * Math.sin(j * Math.PI * 2 / numSegments);
+                // If player has interpolated position (during animation), use that
+                if (player.interpolatedX !== undefined && player.interpolatedY !== undefined) {
+                    displayX = player.interpolatedX;
+                    displayY = player.interpolatedY;
+                }
 
-                currentX += offset * Math.cos(perpendicularAngle);
-                currentY += offset * Math.sin(perpendicularAngle);
+                ctx.fillStyle = player.color;
+                ctx.beginPath();
+                ctx.arc(displayX, displayY, playerTokenRadius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 1;
+                ctx.stroke();
 
-                ctx.lineTo(currentX + squareSize / 2, currentY + squareSize / 2);
-            }
-            ctx.stroke();
-
-            ctx.fillStyle = '#e74c3c';
-            ctx.beginPath();
-            ctx.arc(startCoords.x + squareSize / 2, startCoords.y + squareSize / 2, squareSize * 0.2, 0, Math.PI * 2);
-            ctx.fill();
-
-            ctx.fillStyle = '#a03126';
-            ctx.beginPath();
-            ctx.arc(endCoords.x + squareSize / 2, endCoords.y + squareSize / 2, squareSize * 0.15, 0, Math.PI * 2);
-            ctx.fill();
+                // Player name / ID on token (optional, can clutter)
+                // ctx.fillStyle = 'white';
+                // ctx.font = `${playerTokenRadius * 0.8}px Arial`;
+                // ctx.textAlign = 'center';
+                // ctx.textBaseline = 'middle';
+                // ctx.fillText(player.id.toString(), displayX, displayY);
+            });
         }
-    }, [squareSize, boardDimension, getCoordinatesForSquareInternal]); // Dependencies for drawSnakesAndLadders
 
-    // Function to draw all player tokens on the canvas.
-    const drawPlayersInternal = useCallback(() => {
-        if (!canvasRef.current) return;
-        const ctx = canvasRef.current.getContext('2d');
-        const playerRadius = squareSize * 0.2;
+        // Animates player movement square by square
+        function animatePlayerMove(playerIndex, startPos, endPos, durationPerSquare = 150) {
+            return new Promise(resolve => {
+                const player = players[playerIndex];
+                let currentPos = startPos;
+                const steps = Math.abs(endPos - startPos); // Number of squares to traverse
 
-        players.forEach(player => {
-            let displayCenterX, displayCenterY;
+                const moveStep = () => {
+                    if (currentPos === endPos) {
+                        player.interpolatedX = undefined; // Clear interpolated position after animation
+                        player.interpolatedY = undefined;
+                        drawPlayers();
+                        resolve();
+                        return;
+                    }
 
-            if (player.interpolatedX !== undefined && player.interpolatedY !== undefined) {
-                displayCenterX = player.interpolatedX;
-                displayCenterY = player.interpolatedY;
-            } else if (player.position > 0) {
-                const coords = getCoordinatesForSquareInternal(player.position);
-                displayCenterX = coords.x + squareSize / 2;
-                displayCenterY = coords.y + squareSize / 2;
-            } else {
+                    const nextPos = (endPos > startPos) ? currentPos + 1 : currentPos - 1;
+                    const targetCoords = (nextPos === 0) ? getStartLineCoordinates() : getCoordinatesForSquare(nextPos);
+                    const targetX = targetCoords.x + squareSize / 2;
+                    const targetY = targetCoords.y + squareSize / 2;
+
+                    // Initial interpolation setup if not already set
+                    if (player.interpolatedX === undefined || player.interpolatedY === undefined) {
+                        const initialCoords = (currentPos === 0) ? getStartLineCoordinates() : getCoordinatesForSquare(currentPos);
+                        player.interpolatedX = initialCoords.x + squareSize / 2;
+                        player.interpolatedY = initialCoords.y + squareSize / 2;
+                    }
+
+                    const startTimestamp = performance.now();
+                    const animateFrame = (timestamp) => {
+                        const elapsed = timestamp - startTimestamp;
+                        const progress = Math.min(elapsed / durationPerSquare, 1);
+
+                        const startPointX = player.interpolatedX;
+                        const startPointY = player.interpolatedY;
+
+                        player.interpolatedX = startPointX + (targetX - startPointX) * progress;
+                        player.interpolatedY = startPointY + (targetY - startPointY) * progress;
+
+                        drawPlayers(); // Redraw board with new player position
+
+                        if (progress < 1) {
+                            requestAnimationFrame(animateFrame);
+                        } else {
+                            currentPos = nextPos; // Move to the next square logically
+                            player.interpolatedX = undefined; // Reset for the next step of the animation
+                            player.interpolatedY = undefined;
+                            moveStep(); // Start animation for the next square
+                        }
+                    };
+                    requestAnimationFrame(animateFrame);
+                };
+
+                moveStep(); // Start the first step
+            });
+        }
+
+
+        // --- Game Logic ---
+
+        function updatePlayerListUI() {
+            playerListUl.innerHTML = ''; // Clear existing list
+            players.forEach((p, idx) => {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                    <span class="player-name-circle player-color-${idx}"></span>
+                    ${p.name}
+                    ${idx === currentPlayerIndex && !gameOver ? '<span class="current-player-indicator">Current</span>' : ''}
+                `;
+                playerListUl.appendChild(li);
+            });
+        }
+
+        function setGameMessage(message) {
+            gameMessageElement.textContent = message;
+        }
+
+        function setDiceResult(result) {
+            diceResultElement.textContent = result;
+        }
+
+        function initializeGame() {
+            const player1Name = player1NameInput.value.trim() || `Player 1`;
+            players = [];
+            players.push({
+                id: 0,
+                name: player1Name,
+                position: 0,
+                color: playerColors[0],
+                interpolatedX: undefined,
+                interpolatedY: undefined
+            });
+
+            const opponentInputs = opponentInputsDiv.querySelectorAll('input[type="text"]');
+            opponentInputs.forEach((input, index) => {
+                const name = input.value.trim() || `Opponent ${index + 1}`;
+                players.push({
+                    id: index + 1,
+                    name: name,
+                    position: 0,
+                    color: playerColors[(index + 1) % playerColors.length],
+                    interpolatedX: undefined,
+                    interpolatedY: undefined
+                });
+            });
+
+            currentPlayerIndex = 0;
+            gameOver = false;
+            rollDiceBtn.disabled = false;
+            restartGameBtn.classList.add('hidden'); // Hide restart button initially
+            setDiceResult('');
+            setGameMessage(`${players[currentPlayerIndex].name}, roll the dice!`);
+            drawBoard();
+            drawPlayers();
+            updatePlayerListUI();
+
+            setupScreen.classList.add('hidden');
+            gameScreen.classList.remove('hidden');
+        }
+
+        async function rollDice() {
+            if (gameOver || rollDiceBtn.disabled) return;
+
+            rollDiceBtn.disabled = true; // Disable button during turn
+
+            const roll = Math.floor(Math.random() * 6) + 1;
+            setDiceResult(`You rolled a ${roll}!`);
+
+            const currentPlayer = players[currentPlayerIndex];
+            let newPosition = currentPlayer.position + roll;
+            let message = '';
+
+            // Handle start condition (must roll 1 to enter board)
+            if (currentPlayer.position === 0 && roll !== 1) {
+                message = `${currentPlayer.name}, you need to roll a 1 to start!`;
+                setGameMessage(message);
+                // Next player's turn
+                currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
+                updatePlayerListUI();
+                rollDiceBtn.disabled = false; // Enable button for next player
                 return;
             }
 
-            ctx.fillStyle = player.color;
-            ctx.beginPath();
-            ctx.arc(displayCenterX, displayCenterY, playerRadius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.strokeStyle = '#333';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-        });
-    }, [players, squareSize, boardDimension, getCoordinatesForSquareInternal]);
-
-    useImperativeHandle(ref, () => ({
-        drawBoardStaticElements: drawBoardStaticElements,
-        drawPlayers: drawPlayersInternal
-    }));
-
-    useEffect(() => {
-        drawBoardStaticElements();
-    }, [drawBoardStaticElements, boardDimension]);
-
-    useEffect(() => {
-        drawBoardStaticElements();
-        drawPlayersInternal();
-    }, [players, drawPlayersInternal, drawBoardStaticElements]);
-
-    return (
-        <canvas id="gameBoardCanvas" ref={canvasRef} width={boardDimension} height={boardDimension}></canvas>
-    );
-}));
-
-// Main App Component: Manages game logic, state, and Firebase integration
-const App = () => {
-    // Firebase service instances (app, db, auth)
-    const [firebaseServices, setFirebaseServices] = useState({ app: null, db: null, auth: null });
-    // User ID for the anonymous session
-    const [userId, setUserId] = useState(null);
-
-    // Game state
-    const [players, setPlayers] = useState([]);
-    const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0);
-    const [diceResult, setDiceResult] = useState('');
-    const [gameMessage, setGameMessage] = useState("Roll the dice to start!");
-    const [gameOver, setGameOver] = useState(false);
-    const [rollButtonDisabled, setRollButtonDisabled] = useState(false);
-    const [boardDimension, setBoardDimension] = useState(600); // Responsive board size
-    const [gameId, setGameId] = useState(null); // ID of the current game in Firestore
-    const [savedGames, setSavedGames] = useState([]); // List of saved games for the user
-
-    // Player 1 name input
-    const [player1NameInput, setPlayer1NameInput] = useState('Player 1');
-
-    // Opponent management
-    const [opponentNameInput, setOpponentNameInput] = useState('');
-    const [currentOpponentNames, setCurrentOpponentNames] = useState([]);
-
-    // Game flow state: 'home', 'setup', 'game', 'instructions'
-    const [currentPage, setCurrentPage] = useState('home');
-    const [firebaseReady, setFirebaseReady] = useState(false); // Flag for Firebase initialization status
-
-    // UI Message state
-    const [displayMessage, setDisplayMessage] = useState({ text: '', type: 'info', visible: false });
-    const messageTimeoutRef = useRef(null);
-
-    // Ref for the GameBoardCanvas component to call its imperative methods
-    const gameBoardCanvasRef = useRef(null);
-
-    // Function to show UI messages
-    const showMessage = useCallback((text, type = 'info', duration = 3000) => {
-        setDisplayMessage({ text, type, visible: true });
-        if (messageTimeoutRef.current) {
-            clearTimeout(messageTimeoutRef.current);
-        }
-        messageTimeoutRef.current = setTimeout(() => {
-            setDisplayMessage(prev => ({ ...prev, visible: false }));
-        }, duration);
-    }, []);
-
-    // Helper function to get X, Y coordinates for a given square number on the canvas.
-    // Wrapped in useCallback to ensure stability.
-    const getCoordinatesForSquare = useCallback((square) => {
-        const squareSize = boardDimension / boardSize;
-        const row = Math.floor((square - 1) / boardSize);
-        let col;
-        if (row % 2 === 0) {
-            col = (square - 1) % boardSize;
-        } else {
-            col = boardSize - 1 - ((square - 1) % boardSize);
-        }
-        const x = col * squareSize;
-        const y = (boardSize - 1 - row) * squareSize;
-        return { x, y };
-    }, [boardDimension]); // Depends on boardDimension
-
-    // Helper function to get initial coordinates for players before they enter square 1
-    // Wrapped in useCallback to ensure stability.
-    const getStartLineCoordinates = useCallback(() => {
-        const squareSize = boardDimension / boardSize;
-        const square1Coords = getCoordinatesForSquare(1); // Use the internal getCoordinatesForSquare
-        return {
-            x: square1Coords.x + squareSize / 2,
-            y: boardDimension + squareSize / 2
-        };
-    }, [boardDimension, getCoordinatesForSquare]); // Depends on boardDimension and getCoordinatesForSquare
-
-    // Fetch saved games for the current user from Firestore
-    const fetchSavedGames = useCallback(async (uid) => {
-        if (!uid || !firebaseReady || !firebaseServices.db) {
-            showMessage("Not signed in or Firebase not ready. Cannot fetch saved games.", "error");
-            return;
-        }
-
-        try {
-            const gamesCollectionRef = collection(firebaseServices.db, `artifacts/${appId}/public/data/snakesAndLaddersGames`);
-            const q = query(gamesCollectionRef, where('playerUids', 'array-contains', uid));
-            const querySnapshot = await getDocs(q);
-            const games = [];
-            querySnapshot.forEach((doc) => {
-                games.push({ id: doc.id, ...doc.data() });
-            });
-            setSavedGames(games);
-            console.log("Fetched saved games:", games);
-            showMessage("Saved games loaded.", "success");
-        } catch (error) {
-            console.error("Error fetching saved games:", error);
-            showMessage("Failed to load saved games. Check console for details.", "error");
-        }
-    }, [firebaseReady, firebaseServices.db, appId, showMessage]);
-
-    // Firebase Initialization and Anonymous Authentication
-    useEffect(() => {
-        let currentApp, currentDb, currentAuth;
-
-        if (!firebaseServices.app && isValidFirebaseConfig(firebaseConfig)) {
-            try {
-                currentApp = initializeApp(firebaseConfig);
-                currentDb = getFirestore(currentApp);
-                currentAuth = getAuth(currentApp);
-                setFirebaseServices({ app: currentApp, db: currentDb, auth: currentAuth });
-                setFirebaseReady(true);
-                console.log("Firebase initialized successfully.");
-
-                const signIn = async () => {
-                    try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(currentAuth, initialAuthToken);
-                        } else {
-                            await signInAnonymously(currentAuth);
-                        }
-                        const currentUid = currentAuth.currentUser.uid;
-                        setUserId(currentUid);
-                        console.log("Signed in anonymously with UID:", currentUid);
-
-                        fetchSavedGames(currentUid);
-
-                        setPlayers(prevPlayers => {
-                            const newPlayers = [...prevPlayers];
-                            const player1Index = newPlayers.findIndex(p => p.id === 0);
-
-                            if (player1Index !== -1) {
-                                newPlayers[player1Index] = {
-                                    ...newPlayers[player1Index],
-                                    uid: currentUid,
-                                    name: player1NameInput || "Player 1"
-                                };
-                            } else {
-                                newPlayers.unshift({
-                                    id: 0,
-                                    uid: currentUid,
-                                    name: player1NameInput || "Player 1",
-                                    position: 0,
-                                    color: playerColors[0],
-                                    interpolatedX: 0,
-                                    interpolatedY: 0
-                                });
-                            }
-                            console.log("DEBUG: Player 1 UID updated in players state:", newPlayers[0].uid);
-                            return newPlayers;
-                        });
-
-                    } catch (error) {
-                        console.error("Anonymous sign-in failed:", error);
-                        showMessage("Failed to sign in anonymously. Game saving/loading disabled.", "error");
-                        setFirebaseReady(false);
-                    }
-                };
-                signIn();
-
-            } catch (error) {
-                console.error("Firebase initialization failed:", error);
-                showMessage("Firebase initialization failed. Game saving/loading disabled. Check console for details.", "error");
-                setFirebaseReady(false);
+            // Handle exceeding total squares
+            if (newPosition > totalSquares) {
+                message = `${currentPlayer.name}, you rolled too high! Stay at ${currentPlayer.position}.`;
+                setGameMessage(message);
+                // Next player's turn
+                currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
+                updatePlayerListUI();
+                rollDiceBtn.disabled = false; // Enable button for next player
+                return;
             }
-        } else if (firebaseServices.app) {
-            if (firebaseServices.auth && !userId) {
-                const currentUid = firebaseServices.auth.currentUser?.uid;
-                if (currentUid) {
-                    setUserId(currentUid);
-                    fetchSavedGames(currentUid);
-                }
-            }
-        } else if (!isValidFirebaseConfig(firebaseConfig)) {
-            showMessage("Firebase configuration is missing or invalid. Game saving/loading disabled.", "error");
-            setFirebaseReady(false);
-        }
-    }, [firebaseServices.app, firebaseServices.db, firebaseServices.auth, fetchSavedGames, userId, initialAuthToken, player1NameInput, firebaseConfig, showMessage]);
 
-    // Effect hook to handle responsive board dimension
-    useEffect(() => {
-        const handleResize = () => {
-            const minDimension = Math.min(window.innerWidth * 0.9, window.innerHeight * 0.7);
-            setBoardDimension(Math.max(400, Math.min(600, minDimension))); // Keep between 400 and 600
-        };
+            // Animate movement to the rolled position
+            await animatePlayerMove(currentPlayerIndex, currentPlayer.position, newPosition);
+            currentPlayer.position = newPosition; // Update player's actual position after animation
 
-        window.addEventListener('resize', handleResize);
-        handleResize(); // Set initial size
-
-        return () => window.removeEventListener('resize', handleResize);
-    }, []);
-
-    // Start a new game
-    const startNewGame = useCallback(() => {
-        console.log("DEBUG: startNewGame called!");
-
-        const newPlayers = [];
-        // Player 1
-        newPlayers.push({
-            id: 0,
-            uid: userId || 'anon',
-            name: player1NameInput || "Player 1",
-            position: 0,
-            color: playerColors[0],
-            interpolatedX: 0,
-            interpolatedY: 0
-        });
-
-        // Opponents
-        currentOpponentNames.forEach((name, index) => {
-            newPlayers.push({ id: index + 1, uid: `opponent-${index + 1}`, name: name, position: 0, color: playerColors[(index + 1) % playerColors.length], interpolatedX: 0, interpolatedY: 0 });
-        });
-
-        console.log("DEBUG: Setting new game players:", newPlayers);
-        setPlayers(newPlayers);
-        setCurrentPlayerIndex(0);
-        setDiceResult('');
-        setGameMessage("Game initialized! Roll the dice.");
-        setGameOver(false);
-        setRollButtonDisabled(false);
-        setGameId(null); // Clear game ID for new game
-        setCurrentPage('game'); // Navigate to game view
-        showMessage("New game started!", "success");
-    }, [userId, player1NameInput, currentOpponentNames, showMessage]);
-
-
-    // Function to leave the current game and go back to setup
-    const leaveGame = useCallback(() => {
-        console.log("DEBUG: leaveGame called!");
-        setCurrentPage('home'); // Go back to the home screen
-        setGameId(null); // Clear the current game ID
-        setPlayers([]); // Clear players to trigger re-initialization on next start
-        setCurrentPlayerIndex(0);
-        setDiceResult('');
-        setGameMessage("Game setup. Start a new game or load a saved one.");
-        setGameOver(false);
-        setRollButtonDisabled(false);
-        showMessage("Game left. Back to home screen.", "info");
-    }, [showMessage]);
-
-    // Save current game state to Firestore
-    const saveGame = useCallback(async () => { // Wrapped in useCallback
-        if (!firebaseReady || !firebaseServices.db || !userId) {
-            showMessage("Cannot save game. Firebase not ready or you are not signed in.", "error");
-            return;
-        }
-
-        try {
-            const gameData = {
-                players: players.map(p => ({ id: p.id, uid: p.uid, name: p.name, position: p.position, color: p.color })),
-                currentPlayerIndex: currentPlayerIndex,
-                gameStarted: currentPage === 'game', // Use currentPage to infer gameStarted state
-                gameOver: gameOver,
-                playerUids: players.map(p => p.uid),
-                timestamp: Date.now()
-            };
-            console.log("DEBUG: Saving game with playerUids:", gameData.playerUids);
-
-
-            const gamesCollectionRef = collection(firebaseServices.db, `artifacts/${appId}/public/data/snakesAndLaddersGames`);
-
-            if (gameId) {
-                // Update existing game
-                const gameDocRef = doc(gamesCollectionRef, gameId);
-                await updateDoc(gameDocRef, gameData);
-                showMessage("Game autosaved successfully!", "success");
+            // Check for snakes and ladders after primary movement
+            let finalPosition = newPosition;
+            if (snakes[newPosition]) {
+                finalPosition = snakes[newPosition];
+                message = `${currentPlayer.name} landed on a snake at ${newPosition} and slid down to ${finalPosition}!`;
+            } else if (ladders[newPosition]) {
+                finalPosition = ladders[newPosition];
+                message = `${currentPlayer.name} found a ladder at ${newPosition} and climbed to ${finalPosition}!`;
             } else {
-                // Save new game
-                const docRef = await addDoc(gamesCollectionRef, gameData);
-                setGameId(docRef.id);
-                showMessage("New game autosaved successfully!", "success");
+                message = `${currentPlayer.name} moved to ${newPosition}.`;
             }
-            await fetchSavedGames(userId);
-        } catch (error) {
-            console.error("Error saving game:", error);
-            showMessage(`Failed to save game: ${error.message}`, "error");
-        }
-    }, [firebaseReady, firebaseServices.db, userId, players, currentPlayerIndex, currentPage, gameOver, gameId, fetchSavedGames, showMessage, appId]); // Added all dependencies
 
-    // Load a selected game from Firestore
-    const loadGame = useCallback(async (gameToLoad) => { // Wrapped in useCallback
-        if (!firebaseReady || !firebaseServices.db || !userId) {
-            showMessage("Cannot load game. Firebase not ready or you are not signed in.", "error");
-            return;
-        }
-
-        try {
-            const loadedPlayers = gameToLoad.players.map(p => {
-                // Use the memoized getCoordinatesForSquare from the App component's scope
-                const coords = getCoordinatesForSquare(p.position);
-                return {
-                    ...p,
-                    interpolatedX: coords.x + (boardDimension / boardSize) / 2,
-                    interpolatedY: coords.y + (boardDimension / boardSize) / 2
-                };
-            });
-
-            setPlayers(loadedPlayers);
-            setCurrentPlayerIndex(gameToLoad.currentPlayerIndex);
-            // setGameStarted(gameToLoad.gameStarted); // This line was causing the ReferenceError for some reason
-            setCurrentPage(gameToLoad.gameStarted ? 'game' : 'setup'); // Use currentPage state to infer gameStarted and navigate
-            setGameOver(gameToLoad.gameOver);
-            setGameId(gameToLoad.id);
-            showMessage(`Game "${gameToLoad.id.substring(0, 8)}..." loaded successfully!`, "success");
-            setRollButtonDisabled(false);
-            setCurrentOpponentNames(loadedPlayers.filter(p => p.id !== 0).map(p => p.name));
-            if (loadedPlayers[0]) {
-                setPlayer1NameInput(loadedPlayers[0].name);
+            // Animate movement for snake/ladder if applicable
+            if (finalPosition !== newPosition) {
+                await animatePlayerMove(currentPlayerIndex, newPosition, finalPosition);
+                currentPlayer.position = finalPosition; // Update player's final position
             }
-            if (gameBoardCanvasRef.current) {
-                gameBoardCanvasRef.current.drawBoardStaticElements();
-                gameBoardCanvasRef.current.drawPlayers();
+
+            setGameMessage(message);
+            drawPlayers(); // Ensure players are drawn at their final position
+
+            // Check for win condition
+            if (finalPosition === totalSquares) {
+                setGameMessage(`${currentPlayer.name} wins the game!`);
+                gameOver = true;
+                rollDiceBtn.disabled = true;
+                restartGameBtn.classList.remove('hidden'); // Show restart button
+            } else {
+                // Next player's turn if game is not over
+                currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
+                setGameMessage(`${players[currentPlayerIndex].name}'s turn. Roll the dice!`);
+                rollDiceBtn.disabled = false; // Enable button for next player
             }
-            setCurrentPage('game'); // Ensure navigation to game view after loading
-        } catch (error) {
-            console.error("Error loading game:", error);
-            showMessage(`Failed to load game: ${error.message}`, "error");
-        }
-    }, [firebaseReady, firebaseServices.db, userId, boardDimension, showMessage, setPlayers, setCurrentPlayerIndex, setGameOver, setGameId, setRollButtonDisabled, setCurrentOpponentNames, setPlayer1NameInput, gameBoardCanvasRef, getCoordinatesForSquare, setCurrentPage]); // Added all dependencies
-
-    // Delete a selected game from Firestore
-    const deleteGame = async (gameIdToDelete) => {
-        if (!firebaseReady || !firebaseServices.db || !userId) {
-            showMessage("Cannot delete game. Firebase not ready or you are not signed in.", "error");
-            return;
+            updatePlayerListUI(); // Update UI to show current player
         }
 
-        try {
-            const gameDocRef = doc(firebaseServices.db, `artifacts/${appId}/public/data/snakesAndLaddersGames`, gameIdToDelete);
-            await deleteDoc(gameDocRef);
-            showMessage("Game deleted successfully!", "success");
-            await fetchSavedGames(userId);
-            if (gameIdToDelete === gameId) {
-                leaveGame();
+        function restartGame() {
+            setupScreen.classList.remove('hidden');
+            gameScreen.classList.add('hidden');
+            players = []; // Clear players
+            opponentInputsDiv.innerHTML = ''; // Clear opponent inputs
+            player1NameInput.value = 'Player 1'; // Reset default name
+            updatePlayerListUI(); // Clear player list UI
+            setGameMessage("Ready to start a new game!");
+            setDiceResult('');
+            restartGameBtn.classList.add('hidden');
+        }
+
+        // --- Player Setup Management ---
+        function addPlayerInput() {
+            if (players.length >= opponentMax + 1) { // Player 1 + max opponents
+                alert(`Maximum ${opponentMax + 1} players allowed.`);
+                return;
             }
-        } catch (error) {
-            console.error("Error deleting game:", error);
-            showMessage(`Failed to delete game: ${error.message}`, "error");
-        }
-    };
-
-
-    // Main game logic: Roll Dice
-    const rollDice = async () => {
-        if (gameOver || rollButtonDisabled) return;
-
-        setRollButtonDisabled(true); // Disable button during turn
-        const roll = Math.floor(Math.random() * 6) + 1;
-        setDiceResult(`You rolled a ${roll}!`);
-
-        const currentPlayer = players[currentPlayerIndex];
-        let newPosition = currentPlayer.position + roll;
-
-        // Animate player movement
-        const animateMovement = (startPos, endPos, duration) => {
-            return new Promise(resolve => {
-                const startTime = performance.now();
-                const squareSize = boardDimension / boardSize; // Get square size for animation
-                const startCoords = startPos === 0
-                    ? getStartLineCoordinates() // Use memoized helper
-                    : getCoordinatesForSquare(startPos); // Use memoized helper
-
-                const endCoords = endPos === 0
-                    ? getStartLineCoordinates() // Use memoized helper
-                    : getCoordinatesForSquare(endPos); // Use memoized helper
-
-                const targetX = endCoords.x + squareSize / 2;
-                const targetY = endCoords.y + squareSize / 2;
-
-                const initialX = startCoords.x + squareSize / 2;
-                const initialY = startCoords.y + squareSize / 2;
-
-                const animate = (currentTime) => {
-                    const elapsedTime = currentTime - startTime;
-                    const progress = Math.min(elapsedTime / duration, 1);
-
-                    setPlayers(prevPlayers => prevPlayers.map((p, idx) =>
-                        idx === currentPlayerIndex ? { ...p, interpolatedX, interpolatedY } : p
-                    ));
-
-                    if (progress < 1) {
-                        requestAnimationFrame(animate);
-                    } else {
-                        resolve();
-                    }
-                };
-                requestAnimationFrame(animate);
+            const newPlayerId = players.length;
+            const inputGroup = document.createElement('div');
+            inputGroup.classList.add('player-input-group');
+            inputGroup.innerHTML = `
+                <input type="text" placeholder="Opponent ${newPlayerId}" value="Opponent ${newPlayerId}">
+                <button class="remove-player-btn" data-player-id="${newPlayerId}">Remove</button>
+            `;
+            opponentInputsDiv.appendChild(inputGroup);
+            // Add event listener to the new remove button
+            inputGroup.querySelector('.remove-player-btn').addEventListener('click', function() {
+                this.parentElement.remove();
+                // We don't update `players` array directly here, it's done on `startGameBtn` click
+                // This ensures player IDs are assigned correctly based on the final input order.
             });
-        };
-
-        // If player is still on the start line (position 0), they need to roll a 1 to enter the board.
-        if (currentPlayer.position === 0 && roll !== 1) {
-            setGameMessage(`${currentPlayer.name}, you need to roll a 1 to start!`);
-            showMessage(`${currentPlayer.name}, you need to roll a 1 to start!`, "info");
-            setRollButtonDisabled(false); // Enable button for next player
-            setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length); // Next player's turn
-            await saveGame();
-            return;
+            // Update temporary player list for UI feedback
+            updateTemporaryPlayerList();
         }
 
-        // Prevent exceeding total squares
-        if (newPosition > totalSquares) {
-            setGameMessage(`${currentPlayer.name}, you rolled too high! Stay at ${currentPlayer.position}.`);
-            showMessage(`${currentPlayer.name}, you rolled too high! Stay at ${currentPlayer.position}.`, "info");
-            setRollButtonDisabled(false); // Enable button for next player
-            setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length); // Next player's turn
-            await saveGame();
-            return;
-        }
+        function updateTemporaryPlayerList() {
+            playerListUl.innerHTML = ''; // Clear existing list
+            // Add Player 1
+            const p1Li = document.createElement('li');
+            p1Li.innerHTML = `<span class="player-name-circle player-color-0"></span> ${player1NameInput.value.trim() || 'Player 1'}`;
+            playerListUl.appendChild(p1Li);
 
-        // Animate movement to the new position
-        await animateMovement(currentPlayer.position, newPosition, 500);
-
-        // Check for snakes and ladders AFTER animating to the rolled position
-        let finalPosition = newPosition;
-        let message = `${currentPlayer.name} moved to ${newPosition}.`;
-
-        if (snakes[newPosition]) {
-            finalPosition = snakes[newPosition];
-            message = `${currentPlayer.name} landed on a snake at ${newPosition} and slid down to ${finalPosition}!`;
-            showMessage("Oh no! A snake!", "error");
-        } else if (ladders[newPosition]) {
-            finalPosition = ladders[newPosition];
-            message = `${currentPlayer.name} found a ladder at ${newPosition} and climbed to ${finalPosition}!`;
-            showMessage("Yay! A ladder!", "success");
-        }
-
-        // Animate movement for snake/ladder
-        if (finalPosition !== newPosition) {
-            await animateMovement(newPosition, finalPosition, 500);
-        }
-
-        setPlayers(prevPlayers => prevPlayers.map((p, idx) =>
-            idx === currentPlayerIndex ? { ...p, position: finalPosition } : p
-        ));
-        setGameMessage(message);
-        showMessage(message, "info");
-
-
-        // Check for win condition
-        if (finalPosition === totalSquares) {
-            setGameMessage(`${currentPlayer.name} wins the game!`);
-            showMessage(`${currentPlayer.name} wins the game!`, "success", 5000); // Longer display for win message
-            setGameOver(true);
-            setRollButtonDisabled(true);
-        } else {
-            setCurrentPlayerIndex((currentPlayerIndex + 1) % players.length);
-            setRollButtonDisabled(false);
-        }
-
-        await saveGame();
-    };
-
-
-    // Initial player setup when Firebase becomes ready and players are still empty
-    useEffect(() => {
-        // This useEffect ensures that if the players array is still empty
-        // after Firebase init and userId is available, the initial players
-        // are set up using the input name and any opponents.
-        // Also ensure it only runs when we are NOT on the instructions page.
-        if (players.length === 0 && firebaseReady && userId && currentPage !== 'instructions') {
-            console.log("DEBUG: Initial players array empty, initializing players.");
-            const initialPlayers = [];
-            initialPlayers.push({
-                id: 0,
-                uid: userId,
-                name: player1NameInput || "Player 1",
-                position: 0,
-                color: playerColors[0],
-                interpolatedX: 0,
-                interpolatedY: 0
+            // Add Opponents
+            const opponentInputs = opponentInputsDiv.querySelectorAll('input[type="text"]');
+            opponentInputs.forEach((input, index) => {
+                const li = document.createElement('li');
+                const name = input.value.trim() || `Opponent ${index + 1}`;
+                li.innerHTML = `<span class="player-name-circle player-color-${(index + 1) % playerColors.length}"></span> ${name}`;
+                playerListUl.appendChild(li);
             });
-
-            currentOpponentNames.forEach((name, index) => {
-                initialPlayers.push({ id: index + 1, uid: `opponent-${index + 1}`, name: name, position: 0, color: playerColors[(index + 1) % playerColors.length], interpolatedX: 0, interpolatedY: 0 });
-            });
-            setPlayers(initialPlayers);
         }
-    }, [players.length, firebaseReady, userId, player1NameInput, currentOpponentNames, currentPage]);
 
 
-    // Handle adding opponents
-    const handleAddOpponent = useCallback(() => {
-        if (currentOpponentNames.length < 3) {
-            setCurrentOpponentNames([...currentOpponentNames, opponentNameInput || `Opponent ${currentOpponentNames.length + 1}`]);
-            setOpponentNameInput('');
-            showMessage("Opponent added!", "info", 1500);
-        } else {
-            showMessage("Maximum 4 players (1 You + 3 Opponents) allowed.", "error");
-        }
-    }, [currentOpponentNames, opponentNameInput, showMessage]);
+        // --- Event Listeners ---
+        rollDiceBtn.addEventListener('click', rollDice);
+        restartGameBtn.addEventListener('click', restartGame);
+        addPlayerBtn.addEventListener('click', addPlayerInput);
+        startGameBtn.addEventListener('click', initializeGame);
 
-    // Handle removing opponents
-    const handleRemoveOpponent = useCallback((indexToRemove) => {
-        setCurrentOpponentNames(currentOpponentNames.filter((_, index) => index !== indexToRemove));
-        showMessage("Opponent removed.", "info", 1500);
-    }, [currentOpponentNames, showMessage]);
+        // Update temporary player list as names are typed or opponents added/removed
+        player1NameInput.addEventListener('input', updateTemporaryPlayerList);
+        opponentInputsDiv.addEventListener('input', (event) => {
+            if (event.target.tagName === 'INPUT') {
+                updateTemporaryPlayerList();
+            }
+        });
 
 
-    return (
-        <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex flex-col items-center justify-center p-4 font-inter text-gray-800">
-            <h1 className="text-5xl font-extrabold text-blue-700 mb-6 drop-shadow-lg">Snakes & Ladders</h1>
+        // Initial setup on page load
+        window.addEventListener('load', () => {
+            adjustCanvasSize(); // Set initial canvas size
+            updateTemporaryPlayerList(); // Display initial player 1
+        });
+        window.addEventListener('resize', adjustCanvasSize); // Adjust on window resize
 
-            {/* Global Message Display */}
-            <div className={`fixed top-4 z-50 p-3 rounded-lg shadow-lg transition-opacity duration-500 ${displayMessage.visible ? 'opacity-100' : 'opacity-0 pointer-events-none'}
-                        ${displayMessage.type === 'error' ? 'bg-red-500 text-white' :
-                          displayMessage.type === 'success' ? 'bg-green-500 text-white' :
-                          'bg-blue-500 text-white'}`}>
-                {displayMessage.text}
-            </div>
-
-            {currentPage === 'home' && (
-                <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg mb-8 border border-blue-200 text-center">
-                    <h2 className="text-3xl font-bold text-blue-700 mb-6">Welcome!</h2>
-                    <p className="text-lg text-gray-700 mb-8">Ready to play Snakes and Ladders?</p>
-                    <div className="flex flex-col gap-4">
-                        <button
-                            onClick={() => setCurrentPage('setup')}
-                            className="px-8 py-4 bg-purple-600 text-white font-bold text-xl rounded-full shadow-xl hover:bg-purple-700 transition duration-300 transform hover:scale-105"
-                        >
-                            Start New Game
-                        </button>
-                        <button
-                            onClick={() => setCurrentPage('instructions')}
-                            className="px-8 py-4 bg-indigo-500 text-white font-bold text-xl rounded-full shadow-lg hover:bg-indigo-600 transition duration-300 transform hover:scale-105"
-                        >
-                            How to Play
-                        </button>
-                         {firebaseReady && userId && savedGames.length > 0 && (
-                            <button
-                                onClick={() => {
-                                    // Default to loading the first game if savedGames is not empty
-                                    if (savedGames.length > 0) {
-                                        loadGame(savedGames[0]);
-                                    }
-                                }}
-                                className="px-8 py-4 bg-teal-500 text-white font-bold text-xl rounded-full shadow-lg hover:bg-teal-600 transition duration-300 transform hover:scale-105"
-                            >
-                                Load Last Game
-                            </button>
-                        )}
-                    </div>
-                </div>
-            )}
-
-            {currentPage === 'instructions' && (
-                <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg mb-8 border border-blue-200">
-                    <h2 className="text-3xl font-bold text-blue-700 mb-6 text-center">How to Play</h2>
-                    <div className="prose max-w-none text-gray-700">
-                        <p>Snakes and Ladders is a classic board game for 2 to 4 players.</p>
-                        <h3 className="text-xl font-semibold text-blue-600 mb-2">Objective:</h3>
-                        <p>Be the first player to reach square 100.</p>
-                        <h3 className="text-xl font-semibold text-blue-600 mb-2">Gameplay:</h3>
-                        <ol className="list-decimal list-inside space-y-2">
-                            <li>Each player starts at square 0 (off the board).</li>
-                            <li>Roll the dice. You need to roll a 1 to move your token onto square 1.</li>
-                            <li>On subsequent turns, roll the dice and move your token forward the number of squares indicated by the dice.</li>
-                            <li>If you land on the bottom of a **ladder**, you climb up to the square at the top of the ladder.</li>
-                            <li>If you land on the head of a **snake**, you slide down to the square at its tail.</li>
-                            <li>The game automatically saves your progress after every move!</li>
-                            <li>You must land exactly on square 100 to win. If your roll takes you beyond 100, you remain on your current square.</li>
-                        </ol>
-                        <h3 className="text-xl font-semibold text-blue-600 mt-4 mb-2">Good luck and have fun!</h3>
-                    </div>
-                    <button
-                        onClick={() => setCurrentPage('home')}
-                        className="mt-8 px-6 py-3 bg-indigo-500 text-white font-bold rounded-lg shadow-md hover:bg-indigo-600 transition duration-300 transform hover:scale-105"
-                    >
-                        Back to Home
-                    </button>
-                </div>
-            )}
-
-            {currentPage === 'setup' && (
-                <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg mb-8 border border-blue-200">
-                    <h2 className="text-2xl font-semibold text-blue-600 mb-4 text-center">Setup Your Game</h2>
-
-                    {/* Player Name and Opponent Management */}
-                    <div className="mb-6">
-                        <h3 className="text-xl font-medium text-blue-500 mb-2">Players</h3>
-                        <div className="flex flex-col gap-2 mb-4">
-                            {/* Input for Player 1's Name */}
-                            <div className="p-2 bg-blue-50 rounded-md flex items-center justify-between">
-                                <input
-                                    type="text"
-                                    placeholder="Your Name (Player 1)"
-                                    className="flex-grow p-1 bg-transparent border-none focus:ring-0 focus:outline-none font-medium text-blue-700"
-                                    value={player1NameInput}
-                                    onChange={(e) => setPlayer1NameInput(e.target.value)}
-                                />
-                                <span className="text-sm text-gray-500">(You)</span>
-                            </div>
-
-                            {/* Opponent List */}
-                            {currentOpponentNames.map((name, index) => (
-                                <div key={index} className="p-2 bg-gray-50 rounded-md flex items-center justify-between">
-                                    <span>{name}</span>
-                                    <button
-                                        onClick={() => handleRemoveOpponent(index)}
-                                        className="text-red-500 hover:text-red-700 text-sm"
-                                    >
-                                        Remove
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                        {currentOpponentNames.length < 3 && (
-                            <div className="flex gap-2">
-                                <input
-                                    type="text"
-                                    placeholder="Opponent Name"
-                                    className="flex-grow p-3 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:outline-none"
-                                    value={opponentNameInput}
-                                    onChange={(e) => setOpponentNameInput(e.target.value)}
-                                />
-                                <button
-                                    onClick={handleAddOpponent}
-                                    className="px-4 py-2 bg-green-500 text-white font-bold rounded-lg shadow-md hover:bg-green-600 transition duration-300 transform hover:scale-105"
-                                >
-                                    Add
-                                </button>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Game Control Buttons */}
-                    <div className="flex flex-col gap-4">
-                        <button
-                            onClick={startNewGame}
-                            className="px-6 py-3 bg-purple-600 text-white font-bold text-lg rounded-lg shadow-xl hover:bg-purple-700 transition duration-300 transform hover:scale-105"
-                        >
-                            Start New Game
-                        </button>
-                        {firebaseReady && userId && savedGames.length > 0 && (
-                            <div className="mt-4">
-                                <h3 className="text-xl font-medium text-blue-500 mb-2">Load Saved Game</h3>
-                                <div className="flex flex-col gap-2 max-h-48 overflow-y-auto custom-scrollbar">
-                                    {savedGames.map((game) => (
-                                        <div key={game.id} className="p-3 bg-blue-50 rounded-lg flex items-center justify-between shadow-sm">
-                                            <span className="text-blue-700 font-medium">
-                                                Game ID: {game.id.substring(0, 8)}... ({new Date(game.timestamp).toLocaleDateString()})
-                                            </span>
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => loadGame(game)}
-                                                    className="px-4 py-2 bg-indigo-500 text-white text-sm rounded-lg shadow hover:bg-indigo-600 transition duration-300"
-                                                >
-                                                    Load
-                                                </button>
-                                                <button
-                                                    onClick={() => deleteGame(game.id)}
-                                                    className="px-4 py-2 bg-red-400 text-white text-sm rounded-lg shadow hover:bg-red-500 transition duration-300"
-                                                >
-                                                    Delete
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                        <button
-                            onClick={() => setCurrentPage('home')}
-                            className="mt-4 px-6 py-3 bg-gray-500 text-white font-bold rounded-lg shadow-md hover:bg-gray-600 transition duration-300 transform hover:scale-105"
-                        >
-                            Back to Home
-                        </button>
-                    </div>
-                </div>
-            )}
-
-            {currentPage === 'game' && (
-                <div className="flex flex-col items-center">
-                    <div className="bg-white p-6 rounded-xl shadow-2xl mb-6 text-center border border-blue-200 w-full max-w-lg">
-                        <p className="text-xl font-semibold mb-2 text-blue-800">{gameMessage}</p>
-                        <p className="text-lg font-medium text-gray-700 mb-4">{diceResult}</p>
-                        {!gameOver && (
-                            <div className="flex items-center justify-center space-x-4 mb-4">
-                                <span className="text-2xl font-bold text-purple-700">
-                                    {players[currentPlayerIndex]?.name}'s turn
-                                </span>
-                                <div className="w-8 h-8 rounded-full shadow-md border-2 border-gray-300"
-                                     style={{ backgroundColor: players[currentPlayerIndex]?.color }}></div>
-                            </div>
-                        )}
-                        <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                            {!gameOver && (
-                                <button
-                                    onClick={rollDice}
-                                    disabled={rollButtonDisabled}
-                                    className={`px-8 py-4 text-white font-bold text-xl rounded-full shadow-lg transition duration-300 transform ${rollButtonDisabled ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 hover:scale-105'}`}
-                                >
-                                    Roll Dice
-                                </button>
-                            )}
-                            {firebaseReady && userId && (
-                                <button
-                                    onClick={saveGame} // Manual save button
-                                    className="px-8 py-4 bg-green-500 text-white font-bold text-xl rounded-full shadow-lg hover:bg-green-600 transition duration-300 transform hover:scale-105"
-                                >
-                                    Save Game
-                                </button>
-                            )}
-                             <button
-                                onClick={startNewGame} // New game from active game
-                                className="px-8 py-4 bg-orange-500 text-white font-bold text-xl rounded-full shadow-lg hover:bg-orange-600 transition duration-300 transform hover:scale-105"
-                            >
-                                New Game
-                            </button>
-                            <button
-                                onClick={leaveGame} // Leave game button
-                                className="px-8 py-4 bg-red-500 text-white font-bold text-xl rounded-full shadow-lg hover:bg-red-600 transition duration-300 transform hover:scale-105"
-                            >
-                                Leave Game
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="relative border-4 border-blue-600 rounded-xl shadow-2xl overflow-hidden"
-                         style={{ width: boardDimension, height: boardDimension }}>
-                        <GameBoardCanvas key={currentPage === 'game' ? "game-active" : "game-inactive"} ref={gameBoardCanvasRef} players={players} boardDimension={boardDimension} />
-                        <div className="absolute top-2 left-2 p-2 bg-white bg-opacity-80 rounded-lg shadow-md">
-                            <h3 className="text-lg font-semibold text-blue-700 mb-1">Players:</h3>
-                            <ul className="text-sm">
-                                {players.map(player => (
-                                    <li key={player.id} className="flex items-center gap-2 mb-1">
-                                        <div className="w-4 h-4 rounded-full" style={{ backgroundColor: player.color }}></div>
-                                        <span className="font-medium">{player.name}</span>
-                                        <span className="text-gray-600"> (Pos: {player.position})</span>
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-};
-
-export default App;
+    </script>
+</body>
+</html>
