@@ -18,6 +18,7 @@
             color: #334e68;
             padding: 20px;
             box-sizing: border-box;
+            overflow-x: hidden; /* Prevent horizontal scroll for confetti */
         }
 
         h1 {
@@ -38,6 +39,7 @@
             max-width: 900px;
             width: 100%;
             margin-bottom: 20px;
+            position: relative; /* For modal positioning */
         }
 
         #gameBoardCanvas {
@@ -62,7 +64,7 @@
             border: none;
             border-radius: 8px;
             cursor: pointer;
-            transition: background-color 0.3s ease, transform 0.1s ease;
+            transition: background-color 0.3s ease, transform 0.1s ease, box-shadow 0.3s ease;
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
         }
 
@@ -74,6 +76,7 @@
         .controls button:hover:not(:disabled) {
             background-color: #2980b9;
             transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
         }
 
         .controls button:disabled {
@@ -168,7 +171,7 @@
         }
 
         .hidden {
-            display: none;
+            display: none !important;
         }
 
         /* Specific colors for players for visual distinction */
@@ -176,6 +179,109 @@
         .player-color-1 { background-color: #2980b9; } /* Blue */
         .player-color-2 { background-color: #27ae60; } /* Green */
         .player-color-3 { background-color: #f39c12; } /* Orange */
+
+        /* Dice Display */
+        #diceDisplay {
+            width: 80px;
+            height: 80px;
+            border: 3px solid #2c3e50;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3em;
+            font-weight: bold;
+            background-color: #f1c40f; /* Yellowish */
+            color: #2c3e50;
+            transition: transform 0.1s ease-out;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            margin-bottom: 10px;
+        }
+
+        #diceDisplay.rolling {
+            animation: diceRollAnimation 0.1s infinite alternate;
+        }
+
+        @keyframes diceRollAnimation {
+            from { transform: rotate(0deg) scale(1); }
+            to { transform: rotate(15deg) scale(1.05); }
+        }
+
+        /* Game Over Modal */
+        #gameOverModal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+
+        #gameOverModal.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .modal-content {
+            background-color: #fff;
+            padding: 40px;
+            border-radius: 15px;
+            text-align: center;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+            max-width: 90%;
+            transform: scale(0.9);
+            transition: transform 0.3s ease;
+        }
+
+        #gameOverModal.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-content h2 {
+            color: #27ae60;
+            font-size: 2.5em;
+            margin-bottom: 15px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .modal-content p {
+            font-size: 1.4em;
+            color: #334e68;
+            margin-bottom: 30px;
+        }
+
+        .modal-content button {
+            background-color: #3498db;
+            color: white;
+            padding: 15px 30px;
+            font-size: 1.2em;
+            border-radius: 10px;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal-content button:hover {
+            background-color: #2980b9;
+            transform: translateY(-3px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Confetti Canvas */
+        #confettiCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allow clicks through */
+            z-index: 999; /* Below modal, above game board */
+        }
     </style>
 </head>
 <body>
@@ -199,11 +305,19 @@
 
         <div id="gameScreen" class="hidden">
             <canvas id="gameBoardCanvas"></canvas>
-            <div class="controls">
-                <p id="diceResult"></p>
+            <canvas id="confettiCanvas"></canvas> <div class="controls">
+                <div id="diceDisplay"></div> <p id="diceResult"></p>
                 <button id="rollDiceBtn">Roll Dice</button>
                 <p id="gameMessage"></p>
-                <button id="restartGameBtn">Restart Game</button>
+                <button id="restartGameBtn" class="hidden">Restart Game</button>
+            </div>
+        </div>
+
+        <div id="gameOverModal" class="hidden">
+            <div class="modal-content">
+                <h2 id="winnerNameDisplay"></h2>
+                <p>Congratulations!</p>
+                <button id="playAgainBtn">Play Again</button>
             </div>
         </div>
     </div>
@@ -231,16 +345,23 @@
         const gameScreen = document.getElementById('gameScreen');
         const canvas = document.getElementById('gameBoardCanvas');
         const ctx = canvas.getContext('2d');
+        const confettiCanvas = document.getElementById('confettiCanvas');
+        const confettiCtx = confettiCanvas.getContext('2d');
         const rollDiceBtn = document.getElementById('rollDiceBtn');
         const gameMessageElement = document.getElementById('gameMessage');
         const diceResultElement = document.getElementById('diceResult');
         const restartGameBtn = document.getElementById('restartGameBtn');
+        const diceDisplay = document.getElementById('diceDisplay'); // New: for visual dice
 
         const player1NameInput = document.getElementById('player1Name');
         const opponentInputsDiv = document.getElementById('opponentInputs');
         const addPlayerBtn = document.getElementById('addPlayerBtn');
         const startGameBtn = document.getElementById('startGameBtn');
         const playerListUl = document.getElementById('playerList');
+
+        const gameOverModal = document.getElementById('gameOverModal');
+        const winnerNameDisplay = document.getElementById('winnerNameDisplay');
+        const playAgainBtn = document.getElementById('playAgainBtn');
 
         // --- Game State Variables ---
         let players = [];
@@ -249,8 +370,34 @@
         let boardDimension = 600; // Default canvas size, will be responsive
         let squareSize = 0; // Calculated dynamically
         const opponentMax = playerColors.length - 1; // Max opponents based on available colors
+        let confettiParticles = [];
+        let animationFrameId = null; // For confetti animation
+
+        // --- Audio Context for sound effects ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
         // --- Helper Functions ---
+
+        // Function to play a simple tone (beep)
+        function playTone(frequency, duration, type = 'sine', volume = 0.3) {
+            if (!audioCtx) return; // Ensure audio context is available
+
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration);
+
+            // Fade out to prevent clicks
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        }
 
         // Adjusts canvas size responsively
         function adjustCanvasSize() {
@@ -259,6 +406,8 @@
             boardDimension = Math.max(400, Math.min(600, minDimension)); // Keep between 400 and 600
             canvas.width = boardDimension;
             canvas.height = boardDimension;
+            confettiCanvas.width = boardDimension; // Confetti canvas matches board size
+            confettiCanvas.height = boardDimension;
             squareSize = boardDimension / boardSize;
             drawBoard(); // Redraw board when size changes
             drawPlayers(); // Redraw players
@@ -326,7 +475,6 @@
                 const x2 = endCoords.x + squareSize / 2;
                 const y2 = endCoords.y + squareSize / 2;
 
-                // Draw two parallel lines for ladder sides
                 const angle = Math.atan2(y2 - y1, x2 - x1);
                 const offset = squareSize * 0.1; // Offset for parallel lines
                 ctx.beginPath();
@@ -415,7 +563,7 @@
 
             const playerTokenRadius = squareSize * playerRadiusRatio;
 
-            players.forEach(player => {
+            players.forEach((player, index) => {
                 let displayX, displayY;
 
                 if (player.position === 0) {
@@ -426,9 +574,15 @@
                 } else {
                     const coords = getCoordinatesForSquare(player.position);
                     // Adjust for multiple players on the same square
-                    const offsetIndex = players.filter(p => p.position === player.position && p.id <= player.id).length - 1;
-                    const offsetX = (offsetIndex % 2 === 0 ? 1 : -1) * (Math.floor(offsetIndex / 2) + 1) * (playerTokenRadius * 0.7);
-                    const offsetY = (offsetIndex % 2 === 1 ? 1 : -1) * (Math.floor(offsetIndex / 2) + 1) * (playerTokenRadius * 0.7);
+                    const playersOnSquare = players.filter(p => p.position === player.position);
+                    const playerIndexOnSquare = playersOnSquare.indexOf(player);
+
+                    // Distribute players around the center of the square
+                    const maxOffset = playerTokenRadius * 0.8;
+                    const angleStep = (2 * Math.PI) / (playersOnSquare.length || 1);
+                    const angle = playerIndexOnSquare * angleStep;
+                    const offsetX = maxOffset * Math.cos(angle);
+                    const offsetY = maxOffset * Math.sin(angle);
 
                     displayX = coords.x + squareSize / 2 + offsetX;
                     displayY = coords.y + squareSize / 2 + offsetY;
@@ -448,12 +602,16 @@
                 ctx.lineWidth = 1;
                 ctx.stroke();
 
-                // Player name / ID on token (optional, can clutter)
-                // ctx.fillStyle = 'white';
-                // ctx.font = `${playerTokenRadius * 0.8}px Arial`;
-                // ctx.textAlign = 'center';
-                // ctx.textBaseline = 'middle';
-                // ctx.fillText(player.id.toString(), displayX, displayY);
+                // Highlight current player's token
+                if (index === currentPlayerIndex && !gameOver) {
+                    ctx.shadowBlur = 15;
+                    ctx.shadowColor = player.color;
+                    ctx.fillStyle = player.color;
+                    ctx.beginPath();
+                    ctx.arc(displayX, displayY, playerTokenRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0; // Reset shadow
+                }
             });
         }
 
@@ -462,7 +620,6 @@
             return new Promise(resolve => {
                 const player = players[playerIndex];
                 let currentPos = startPos;
-                const steps = Math.abs(endPos - startPos); // Number of squares to traverse
 
                 const moveStep = () => {
                     if (currentPos === endPos) {
@@ -485,13 +642,13 @@
                         player.interpolatedY = initialCoords.y + squareSize / 2;
                     }
 
-                    const startTimestamp = performance.now();
-                    const animateFrame = (timestamp) => {
-                        const elapsed = timestamp - startTimestamp;
-                        const progress = Math.min(elapsed / durationPerSquare, 1);
+                    const startPointX = player.interpolatedX;
+                    const startPointY = player.interpolatedY;
 
-                        const startPointX = player.interpolatedX;
-                        const startPointY = player.interpolatedY;
+                    const stepStartTime = performance.now();
+                    const animateFrame = (timestamp) => {
+                        const elapsed = timestamp - stepStartTime;
+                        const progress = Math.min(elapsed / durationPerSquare, 1);
 
                         player.interpolatedX = startPointX + (targetX - startPointX) * progress;
                         player.interpolatedY = startPointY + (targetY - startPointY) * progress;
@@ -514,6 +671,66 @@
             });
         }
 
+        // --- Confetti Animation ---
+        function createConfettiParticle() {
+            return {
+                x: Math.random() * confettiCanvas.width,
+                y: Math.random() * -confettiCanvas.height * 0.1, // Start slightly above top
+                size: Math.random() * 8 + 5,
+                color: `hsl(${Math.random() * 360}, 100%, 70%)`,
+                velocity: {
+                    x: Math.random() * 4 - 2, // -2 to 2
+                    y: Math.random() * 3 + 2 // 2 to 5
+                },
+                rotation: Math.random() * 360,
+                rotationSpeed: Math.random() * 10 - 5
+            };
+        }
+
+        function drawConfetti() {
+            confettiCtx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+
+            confettiParticles = confettiParticles.filter(p => p.y < confettiCanvas.height + p.size); // Remove off-screen particles
+
+            for (let i = 0; i < confettiParticles.length; i++) {
+                const p = confettiParticles[i];
+                p.x += p.velocity.x;
+                p.y += p.velocity.y;
+                p.rotation += p.rotationSpeed;
+
+                confettiCtx.save();
+                confettiCtx.translate(p.x, p.y);
+                confettiCtx.rotate(p.rotation * Math.PI / 180);
+
+                confettiCtx.fillStyle = p.color;
+                confettiCtx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size); // Draw as a square
+                confettiCtx.restore();
+            }
+
+            if (confettiParticles.length > 0) {
+                animationFrameId = requestAnimationFrame(drawConfetti);
+            } else {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+        }
+
+        function launchConfetti(count = 100) {
+            confettiParticles = [];
+            for (let i = 0; i < count; i++) {
+                confettiParticles.push(createConfettiParticle());
+            }
+            if (!animationFrameId) {
+                drawConfetti();
+            }
+        }
+
+        function stopConfetti() {
+            confettiParticles = [];
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+            confettiCtx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+        }
 
         // --- Game Logic ---
 
@@ -538,7 +755,23 @@
             diceResultElement.textContent = result;
         }
 
+        function showGameOverModal(winnerName) {
+            winnerNameDisplay.textContent = `${winnerName} wins!`;
+            gameOverModal.classList.remove('hidden');
+            // Force reflow to ensure transition plays
+            void gameOverModal.offsetWidth;
+            gameOverModal.classList.add('active');
+            launchConfetti();
+        }
+
+        function hideGameOverModal() {
+            gameOverModal.classList.remove('active');
+            gameOverModal.classList.add('hidden');
+            stopConfetti();
+        }
+
         function initializeGame() {
+            hideGameOverModal(); // Hide modal if open
             const player1Name = player1NameInput.value.trim() || `Player 1`;
             players = [];
             players.push({
@@ -581,10 +814,29 @@
             if (gameOver || rollDiceBtn.disabled) return;
 
             rollDiceBtn.disabled = true; // Disable button during turn
+            diceDisplay.classList.add('rolling');
+            playTone(440, 0.1); // Dice roll sound
 
-            const roll = Math.floor(Math.random() * 6) + 1;
-            setDiceResult(`You rolled a ${roll}!`);
+            // Simulate dice rolling animation
+            let animationCounter = 0;
+            const animateDice = setInterval(() => {
+                diceDisplay.textContent = Math.floor(Math.random() * 6) + 1;
+                animationCounter++;
+                if (animationCounter > 15) { // Stop after 15 quick changes
+                    clearInterval(animateDice);
+                    diceDisplay.classList.remove('rolling');
 
+                    // Actual roll calculation
+                    const roll = Math.floor(Math.random() * 6) + 1;
+                    diceDisplay.textContent = roll;
+                    setDiceResult(`You rolled a ${roll}!`);
+
+                    handlePlayerMove(roll);
+                }
+            }, 70);
+        }
+
+        async function handlePlayerMove(roll) {
             const currentPlayer = players[currentPlayerIndex];
             let newPosition = currentPlayer.position + roll;
             let message = '';
@@ -617,12 +869,18 @@
 
             // Check for snakes and ladders after primary movement
             let finalPosition = newPosition;
+            let playedSpecialSound = false;
+
             if (snakes[newPosition]) {
                 finalPosition = snakes[newPosition];
                 message = `${currentPlayer.name} landed on a snake at ${newPosition} and slid down to ${finalPosition}!`;
+                playTone(200, 0.3, 'sawtooth'); // Snake slide down sound
+                playedSpecialSound = true;
             } else if (ladders[newPosition]) {
                 finalPosition = ladders[newPosition];
                 message = `${currentPlayer.name} found a ladder at ${newPosition} and climbed to ${finalPosition}!`;
+                playTone(800, 0.3, 'triangle'); // Ladder climb up sound
+                playedSpecialSound = true;
             } else {
                 message = `${currentPlayer.name} moved to ${newPosition}.`;
             }
@@ -642,6 +900,8 @@
                 gameOver = true;
                 rollDiceBtn.disabled = true;
                 restartGameBtn.classList.remove('hidden'); // Show restart button
+                playTone(1000, 1.0, 'sine', 0.5); // Win sound
+                showGameOverModal(currentPlayer.name);
             } else {
                 // Next player's turn if game is not over
                 currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
@@ -651,7 +911,9 @@
             updatePlayerListUI(); // Update UI to show current player
         }
 
+
         function restartGame() {
+            hideGameOverModal();
             setupScreen.classList.remove('hidden');
             gameScreen.classList.add('hidden');
             players = []; // Clear players
@@ -661,27 +923,28 @@
             setGameMessage("Ready to start a new game!");
             setDiceResult('');
             restartGameBtn.classList.add('hidden');
+            diceDisplay.textContent = ''; // Clear dice display
+            stopConfetti(); // Stop any lingering confetti
         }
 
         // --- Player Setup Management ---
         function addPlayerInput() {
-            if (players.length >= opponentMax + 1) { // Player 1 + max opponents
-                alert(`Maximum ${opponentMax + 1} players allowed.`);
+            if (opponentInputsDiv.children.length >= opponentMax) { // Check against max allowed opponents
+                alert(`Maximum ${opponentMax + 1} players allowed (including yourself).`);
                 return;
             }
-            const newPlayerId = players.length;
+            const newPlayerNum = opponentInputsDiv.children.length + 1; // Count existing opponents
             const inputGroup = document.createElement('div');
             inputGroup.classList.add('player-input-group');
             inputGroup.innerHTML = `
-                <input type="text" placeholder="Opponent ${newPlayerId}" value="Opponent ${newPlayerId}">
-                <button class="remove-player-btn" data-player-id="${newPlayerId}">Remove</button>
+                <input type="text" placeholder="Opponent ${newPlayerNum}" value="Opponent ${newPlayerNum}">
+                <button class="remove-player-btn">Remove</button>
             `;
             opponentInputsDiv.appendChild(inputGroup);
             // Add event listener to the new remove button
             inputGroup.querySelector('.remove-player-btn').addEventListener('click', function() {
                 this.parentElement.remove();
-                // We don't update `players` array directly here, it's done on `startGameBtn` click
-                // This ensures player IDs are assigned correctly based on the final input order.
+                updateTemporaryPlayerList(); // Update list after removal
             });
             // Update temporary player list for UI feedback
             updateTemporaryPlayerList();
@@ -710,6 +973,7 @@
         restartGameBtn.addEventListener('click', restartGame);
         addPlayerBtn.addEventListener('click', addPlayerInput);
         startGameBtn.addEventListener('click', initializeGame);
+        playAgainBtn.addEventListener('click', restartGame); // From Game Over modal
 
         // Update temporary player list as names are typed or opponents added/removed
         player1NameInput.addEventListener('input', updateTemporaryPlayerList);
