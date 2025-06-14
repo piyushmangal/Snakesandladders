@@ -326,6 +326,7 @@
         // --- Game Configuration ---
         const boardSize = 10; // 10x10 board
         const totalSquares = boardSize * boardSize;
+        const MAX_ROLLS_TO_START = 5; // After 5 failed attempts, the 6th roll will be a 1
 
         const snakes = {
             16: 6, 47: 26, 49: 11, 56: 53, 62: 19,
@@ -778,6 +779,7 @@
                 id: 0,
                 name: player1Name,
                 position: 0,
+                rollsToStart: 0, // New: Track rolls for starting
                 color: playerColors[0],
                 interpolatedX: undefined,
                 interpolatedY: undefined
@@ -790,6 +792,7 @@
                     id: index + 1,
                     name: name,
                     position: 0,
+                    rollsToStart: 0, // New: Track rolls for starting
                     color: playerColors[(index + 1) % playerColors.length],
                     interpolatedX: undefined,
                     interpolatedY: undefined
@@ -826,8 +829,21 @@
                     clearInterval(animateDice);
                     diceDisplay.classList.remove('rolling');
 
-                    // Actual roll calculation
-                    const roll = Math.floor(Math.random() * 6) + 1;
+                    // Actual roll calculation - MODIFIED FOR GUARANTEED START
+                    const currentPlayer = players[currentPlayerIndex];
+                    let roll;
+                    if (currentPlayer.position === 0) {
+                        currentPlayer.rollsToStart++;
+                        if (currentPlayer.rollsToStart > MAX_ROLLS_TO_START) {
+                            roll = 1; // Force 1 after MAX_ROLLS_TO_START attempts
+                        } else {
+                            roll = Math.floor(Math.random() * 6) + 1;
+                        }
+                    } else {
+                        // Purely random rolls for players already on the board
+                        roll = Math.floor(Math.random() * 6) + 1;
+                    }
+
                     diceDisplay.textContent = roll;
                     setDiceResult(`You rolled a ${roll}!`);
 
@@ -843,13 +859,16 @@
 
             // Handle start condition (must roll 1 to enter board)
             if (currentPlayer.position === 0 && roll !== 1) {
-                message = `${currentPlayer.name}, you need to roll a 1 to start!`;
+                message = `${currentPlayer.name}, you need to roll a 1 to start! (Rolls: ${currentPlayer.rollsToStart}/${MAX_ROLLS_TO_START})`;
                 setGameMessage(message);
                 // Next player's turn
                 currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
                 updatePlayerListUI();
                 rollDiceBtn.disabled = false; // Enable button for next player
                 return;
+            } else if (currentPlayer.position === 0 && roll === 1) {
+                // Player successfully started, reset their rollsToStart counter
+                currentPlayer.rollsToStart = 0;
             }
 
             // Handle exceeding total squares
@@ -869,18 +888,15 @@
 
             // Check for snakes and ladders after primary movement
             let finalPosition = newPosition;
-            let playedSpecialSound = false;
-
+            
             if (snakes[newPosition]) {
                 finalPosition = snakes[newPosition];
                 message = `${currentPlayer.name} landed on a snake at ${newPosition} and slid down to ${finalPosition}!`;
                 playTone(200, 0.3, 'sawtooth'); // Snake slide down sound
-                playedSpecialSound = true;
             } else if (ladders[newPosition]) {
                 finalPosition = ladders[newPosition];
                 message = `${currentPlayer.name} found a ladder at ${newPosition} and climbed to ${finalPosition}!`;
                 playTone(800, 0.3, 'triangle'); // Ladder climb up sound
-                playedSpecialSound = true;
             } else {
                 message = `${currentPlayer.name} moved to ${newPosition}.`;
             }
